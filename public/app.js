@@ -112,11 +112,11 @@
     return { metric: name };
   }
 
-  /* 折算后浓度（页面自算）：实测 × (21 − 基准氧) / (21 − 实测氧含量)，氧含量缺失按 0 代入 */
+  /* 折算后浓度（页面自算）：实测 × (21 − 基准氧) / (21 − 实测氧含量)，氧含量缺失按基准氧处理（等价不折算） */
   function pageConcentration(row) {
     var base = (state.settings && state.settings.oxygenBaseline !== null && state.settings.oxygenBaseline !== undefined)
       ? Number(state.settings.oxygenBaseline) : 8;
-    var oxy = (row.oxygen === null || row.oxygen === undefined || row.oxygen === '') ? 0 : Number(row.oxygen);
+    var oxy = (row.oxygen === null || row.oxygen === undefined || row.oxygen === '') ? base : Number(row.oxygen);
     var denom = 21 - oxy;
     if (!isFinite(denom) || denom === 0) return null;
     var value = Number(row.value);
@@ -379,7 +379,7 @@
       metricCard('排污单位', s.plantCount, '生产中 ' + s.producingCount + ' 家', 'plants'),
       metricCard('排放口', s.outletCount, '运行中 ' + s.runningOutletCount + ' 个', 'plants'),
       metricCard('在线设备', s.deviceCount, dsText, 'devices'),
-      metricCard('监测数据', s.readingCount, '自动 ' + s.autoCount + ' · 补录 ' + s.imputedCount + ' · 无效标记 ' + s.invalidFlagCount, 'readings'),
+      metricCard('监测数据', s.readingCount, '自动 ' + s.autoCount + ' · 补录 ' + s.imputedCount + ' · 人工无效标记 ' + s.invalidFlagCount + ' · 系统判无效 ' + (s.invalidCount || 0), 'readings'),
       metricCard('报表', s.reportCount, '已上报 ' + s.submittedReportCount + ' 张', 'accounting'),
       metricCard('超标排放口', s.exceededOutletCount, '存在月超标判定', 'accounting'),
       metricCard('年累计 COD', s.accumulatedCodTons + ' 吨', '年许可量 ' + s.permitCodTons + ' 吨', 'accounting'),
@@ -740,8 +740,20 @@
   }
 
   /* ================= 监测数据 ================= */
+  function invalidTitle(r) {
+    return (r.invalidReasons && r.invalidReasons.length) ? r.invalidReasons.join('；') : '';
+  }
+  function countedTag(r) {
+    var reasons = invalidTitle(r);
+    return h('span', {
+      class: 'tag ' + (r.counted ? 'tag-ok' : 'tag-danger'),
+      text: r.counted ? '计入' : '不计入',
+      title: reasons,
+    });
+  }
   function readingRow(r) {
-    var pc = pageConcentration(r);
+    var pc = r.counted ? pageConcentration(r) : null;
+    var reasons = invalidTitle(r);
     var actions = actionsCell([
       actionBtn('修改', function () { openReadingForm(r); }),
       deleteBtn('删除', function () {
@@ -753,22 +765,28 @@
       h('td', { text: textOf(r.deviceCode) }),
       h('td', { text: r.metric }),
       h('td', { class: 'nowrap', text: r.at }),
-      h('td', { class: 'mono', text: textOf(r.value) }),
+      h('td', { class: 'mono' + (r.counted ? '' : ' num-danger'), text: textOf(r.value), title: reasons }),
       h('td', {}, h('span', { class: 'tag ' + (r.flag === '有效' ? 'tag-ok' : 'tag-danger'), text: r.flag })),
       h('td', { text: r.source }),
       h('td', { text: textOf(r.operator) }),
-      h('td', {}, h('span', { class: 'tag ' + (r.counted ? 'tag-ok' : 'tag-danger'), text: r.counted ? '计入' : '不计入' })),
+      h('td', {}, countedTag(r)),
       h('td', { class: 'mono cell-page-conc', dataset: { value: pc === null ? '' : String(pc) }, text: pc === null ? '—' : fmt(pc, 2) }),
       h('td', { class: 'mono cell-api-conc', dataset: { value: (r.concentration === null || r.concentration === undefined) ? '' : String(r.concentration) }, text: textOf(r.concentration) }),
       h('td', { class: 'mono', text: textOf(r.oxygen) }),
       h('td', { class: 'mono', text: textOf(r.flow) }),
       actions
     ], function () {
-      return h('div', { class: 'detail-grid' }, [
+      var blocks = [
         h('div', { class: 'detail-block' }, [h('h3', { text: '数据 ID' }), h('div', { text: r.id })]),
         h('div', { class: 'detail-block' }, [h('h3', { text: '设备状态' }), h('div', { text: textOf(r.deviceStatus) })]),
         h('div', { class: 'detail-block' }, [h('h3', { text: '备注' }), h('div', { text: textOf(r.remark) })])
-      ]);
+      ];
+      if (!r.counted) {
+        var ul = h('ul');
+        (r.invalidReasons || []).forEach(function (x) { ul.appendChild(h('li', { class: 'num-danger', text: x })); });
+        blocks.push(h('div', { class: 'detail-block' }, [h('h3', { class: 'num-danger', text: '不计入原因' }), ul]));
+      }
+      return h('div', { class: 'detail-grid' }, blocks);
     });
   }
 
@@ -830,7 +848,7 @@
           '共 ', h('b', { text: String(data.total) }), ' 条，已显示前 ', h('b', { text: String(data.returned) }), ' 条（总条数与已显示条数取自接口 total 与 returned）。'
         ]),
         h('div', { class: 'section-note' }, [
-          '「折算后浓度（页面自算）」由本页按 实测 × (21 − 基准氧) / (21 − 氧含量) 计算，氧含量取接口 oxygen，缺失按 0 代入；「接口折算浓度」直接显示接口 concentration。'
+          '「折算后浓度（页面自算）」由本页按 实测 × (21 − 基准氧) / (21 − 氧含量) 计算，氧含量取接口 oxygen，缺失按基准氧处理（等价不折算）；「接口折算浓度」直接显示接口 concentration。红色数值为被判无效、不计入统计的读数，鼠标悬停或点行可看原因。'
         ]),
         h('div', { class: 'table-wrap' }, h('table', { id: 'tableReadings' }, [
           h('thead', {}, h('tr', {}, [
@@ -921,42 +939,61 @@
   function hourlyTable(rows) {
     var tb = h('tbody');
     (rows || []).forEach(function (r) {
-      tb.appendChild(h('tr', { class: 'row' }, [
+      var reasons = invalidTitle(r);
+      tb.appendChild(h('tr', { class: 'row' + (r.counted ? '' : ' row-invalid'), title: reasons }, [
         h('td', { class: 'nowrap', text: r.at }),
         h('td', { class: 'mono', text: textOf(r.hour) }),
-        h('td', { class: 'mono', text: textOf(r.value) }),
+        h('td', { class: 'mono' + (r.counted ? '' : ' num-danger'), text: textOf(r.value) }),
         h('td', { text: r.source }),
         h('td', {}, h('span', { class: 'tag ' + (r.flag === '有效' ? 'tag-ok' : 'tag-danger'), text: r.flag })),
         h('td', { text: textOf(r.deviceCode) }),
         h('td', {}, statusTag(r.deviceStatus, '正常')),
         h('td', { class: 'mono', text: textOf(r.oxygen) }),
         h('td', { class: 'mono', text: textOf(r.flow) }),
-        h('td', { text: r.counted ? '计入' : '不计入' }),
-        h('td', { class: 'mono', text: textOf(r.concentration) })
+        h('td', {}, countedTag(r)),
+        h('td', { class: 'mono', text: r.concentration === null || r.concentration === undefined ? '—' : textOf(r.concentration) }),
+        h('td', { class: 'reason-cell', text: reasons || '—' })
       ]));
     });
     return h('table', { class: 'mini-table' }, [
       h('thead', {}, h('tr', {}, [
         h('th', { text: '时刻' }), h('th', { text: '小时' }), h('th', { text: '数值' }), h('th', { text: '来源' }),
         h('th', { text: '标记' }), h('th', { text: '设备' }), h('th', { text: '设备状态' }),
-        h('th', { text: '氧含量' }), h('th', { text: '流量' }), h('th', { text: '是否计入' }), h('th', { text: '接口折算浓度' })
+        h('th', { text: '氧含量' }), h('th', { text: '流量' }), h('th', { text: '是否计入' }),
+        h('th', { text: '接口折算浓度' }), h('th', { text: '不计入原因' })
       ])),
       tb
     ]);
   }
 
+  function dayStatusTag(d) {
+    return h('span', {
+      class: 'tag ' + (d.valid ? 'tag-ok' : 'tag-danger'),
+      text: d.valid ? '参与' : '不参与',
+      title: (d.invalidReasons || []).join('；')
+    });
+  }
+
   function dailyRow(d, metric) {
+    var dayReasons = (d.invalidReasons || []).join('；');
     return expandableRow([
       h('td', { class: 'nowrap', text: d.day }),
       h('td', { class: 'mono', text: textOf(d.countedHours) }),
-      h('td', { class: 'mono', text: textOf(d.imputedHours) }),
-      h('td', { class: 'mono', text: fmt(d.average) }),
+      h('td', { class: 'mono' + (d.imputedHours > 6 ? ' num-danger' : ''), text: textOf(d.imputedHours) }),
+      h('td', { class: 'mono', text: d.average === null || d.average === undefined ? '—' : fmt(d.average) }),
       h('td', { class: 'mono', text: textOf(d.limit) }),
-      h('td', {}, h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })),
-      h('td', { class: 'mono', text: fmt(d.flowTotal, 1) })
+      h('td', {}, d.valid
+        ? h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })
+        : h('span', { class: 'tag tag-warn', text: '日无效' })),
+      h('td', { class: 'mono', text: fmt(d.flowTotal, 1) }),
+      h('td', {}, dayStatusTag(d)),
+      h('td', { class: 'reason-cell', text: dayReasons || '—', title: dayReasons })
     ], function () {
       var wrap = h('div');
-      wrap.appendChild(h('div', { class: 'section-note', text: d.day + ' · ' + metric + ' 逐小时明细（共 ' + ((d.rows || []).length) + ' 小时）' }));
+      if (dayReasons) {
+        wrap.appendChild(h('div', { class: 'section-note num-danger', text: '本日不参与平均与总量：' + dayReasons }));
+      }
+      wrap.appendChild(h('div', { class: 'section-note', text: d.day + ' · ' + metric + ' 逐小时明细（共 ' + ((d.rows || []).length) + ' 小时，有效 ' + d.countedHours + ' 小时）' }));
       wrap.appendChild(h('div', { class: 'table-wrap' }, hourlyTable(d.rows)));
       return wrap;
     });
@@ -1009,18 +1046,24 @@
           if (!series.length) { holder.appendChild(h('div', { class: 'empty', text: '本月没有 ' + m + ' 数据' })); return; }
           var tb = h('tbody');
           series.forEach(function (d) {
-            tb.appendChild(h('tr', { class: 'row' }, [
+            var dayReasons = (d.invalidReasons || []).join('；');
+            tb.appendChild(h('tr', { class: 'row', title: dayReasons }, [
               h('td', { class: 'nowrap', text: d.day }), h('td', { class: 'mono', text: textOf(d.countedHours) }),
-              h('td', { class: 'mono', text: textOf(d.imputedHours) }), h('td', { class: 'mono', text: fmt(d.average) }),
+              h('td', { class: 'mono', text: textOf(d.imputedHours) }),
+              h('td', { class: 'mono', text: d.average === null || d.average === undefined ? '—' : fmt(d.average) }),
               h('td', { class: 'mono', text: textOf(d.limit) }),
-              h('td', {}, h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })),
-              h('td', { class: 'mono', text: fmt(d.flowTotal, 1) })
+              h('td', {}, d.valid
+                ? h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })
+                : h('span', { class: 'tag tag-warn', text: '日无效' })),
+              h('td', { class: 'mono', text: fmt(d.flowTotal, 1) }),
+              h('td', { class: 'reason-cell', text: dayReasons || '—' })
             ]));
           });
           holder.appendChild(h('div', { class: 'table-wrap' }, h('table', { class: 'mini-table' }, [
             h('thead', {}, h('tr', {}, [
               h('th', { text: '日期' }), h('th', { text: '有效小时数' }), h('th', { text: '补录小时数' }),
-              h('th', { text: '日均' }), h('th', { text: '限值' }), h('th', { text: '是否超标' }), h('th', { text: '当日流量合计' })
+              h('th', { text: '日均' }), h('th', { text: '限值' }), h('th', { text: '判定' }),
+              h('th', { text: '当日流量合计' }), h('th', { text: '不参与原因' })
             ])),
             tb
           ])));
@@ -1145,7 +1188,8 @@
       h('div', { class: 'table-wrap' }, h('table', { id: 'tableDaily' }, [
         h('thead', {}, h('tr', {}, [
           h('th', { text: '日期' }), h('th', { text: '有效小时数' }), h('th', { text: '补录小时数' }), h('th', { text: '日均' }),
-          h('th', { text: '限值' }), h('th', { text: '是否超标' }), h('th', { text: '当日流量合计' })
+          h('th', { text: '限值' }), h('th', { text: '判定' }), h('th', { text: '当日流量合计' }),
+          h('th', { text: '是否参与' }), h('th', { text: '不参与原因' })
         ])),
         dailyTb
       ]))
@@ -1176,7 +1220,11 @@
     var s = state.settings || {};
     var fields = [
       { name: 'oxygenBaseline', label: '基准氧含量', type: 'number' },
+      { name: 'rangeMin', label: '量程下限', type: 'number' },
       { name: 'rangeMax', label: '量程上限', type: 'number' },
+      { name: 'detectionLimitCod', label: 'COD 检出下限', type: 'number' },
+      { name: 'detectionLimitAmmonia', label: '氨氮检出下限', type: 'number' },
+      { name: 'minDailyHours', label: '单日最少有效小时', type: 'number' },
       { name: 'maxImputeHoursPerDay', label: '单日补录上限（小时）', type: 'number' },
       { name: 'codDailyLimit', label: 'COD 日限值', type: 'number' },
       { name: 'ammoniaDailyLimit', label: '氨氮日限值', type: 'number' },

@@ -387,3 +387,14 @@ tr.expand-row > td {
 .summary-cell .v { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .mini-table table { font-size: 12px; }
 .inline-actions { display: flex; gap: 6px; }
+
+/* 无效读数/不参与统计的行 */
+tbody tr.row-invalid { color: var(--ink-3); }
+tbody tr.row-invalid:hover { background: #f7efec; }
+.reason-cell {
+  white-space: normal;
+  color: var(--danger);
+  max-width: 320px;
+  font-size: 12px;
+}
+.tag[title] { cursor: help; }
