@@ -22,9 +22,44 @@ function readingsOf(data, query) {
   return rows.slice().sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
 }
 
-// 口径：只有有效小时值参与统计——标记为有效、设备状态正常、数值在量程内
-function isCounted(reading, device, settings) {
-  return true;
+// 口径：单日有效小时不足该数，该日不计入平均与总量
+const MIN_VALID_HOURS_PER_DAY = 18;
+// 浓度类指标：按设置里的量程（默认 0 到 500）判定；流量、氧含量按物理合理性判定
+const CONCENTRATION_METRICS = ['COD', '氨氮'];
+// 氧含量的物理合理上限（体积分数 %）
+const OXYGEN_PHYSICAL_MAX = 25;
+
+// 判定一条小时值是否计入统计，并给出不计入原因（口径第 1、8 条）
+// 返回 { counted, reasons }：reasons 为空数组表示计入
+function countVerdict(data, reading) {
+  const settings = data.settings;
+  const reasons = [];
+  const device = deviceOf(data, reading.deviceId);
+  const value = Number(reading.value);
+  if (reading.flag !== '有效') reasons.push('数据标记为「' + (reading.flag || '空') + '」');
+  if (!device) reasons.push('监测设备不存在');
+  else if (device.status !== '正常') reasons.push('设备处于「' + device.status + '」状态');
+  if (!Number.isFinite(value)) {
+    reasons.push('数值不是有效数字');
+  } else {
+    if (value < 0) reasons.push('数值为负（' + value + '），低于检出下限，不合物理');
+    if (CONCENTRATION_METRICS.indexOf(reading.metric) >= 0) {
+      const rangeMax = Number(settings.rangeMax);
+      const rangeMin = Number(settings.rangeMin);
+      if (value > rangeMax) reasons.push('超出量程上限（' + value + ' > ' + rangeMax + '）');
+      if (value >= 0 && value < rangeMin) reasons.push('低于量程下限（' + value + ' < ' + rangeMin + '）');
+    } else if (reading.metric === '氧含量') {
+      if (value > OXYGEN_PHYSICAL_MAX) reasons.push('氧含量超出物理合理范围（0 到 ' + OXYGEN_PHYSICAL_MAX + '）');
+    }
+    // 流量：为负已在上面判定；设置里的量程是污染物浓度量程，不适用于流量
+  }
+  if (isStopped(data, reading)) reasons.push('单位停产或排放口停用时段，按口径不计入');
+  return { counted: reasons.length === 0, reasons };
+}
+
+// 口径：只有有效小时值参与统计——标记为有效、设备状态正常、数值在量程与物理合理范围内
+function isCounted(data, reading) {
+  return countVerdict(data, reading).counted;
 }
 
 // 口径：折算浓度 = 实测浓度 × (21 − 基准氧) / (21 − 实测氧含量)；氧含量缺失按基准氧处理
@@ -43,10 +78,18 @@ function flowAt(data, reading) {
   return row ? Number(row.value) : 0;
 }
 
+// 口径第 8 条：单位停产或排放口停用时段的小时值不计入（但保留可查）
 function isStopped(data, reading) {
   const outlet = outletOf(data, reading.outletId);
   const plant = outlet ? plantOf(data, outlet.plantId) : null;
-  return Number(reading.value) >= 0 && !!(outlet && plant && (outlet.status === '停用' || plant.status === '停产'));
+  return !!(outlet && plant && (outlet.status === '停用' || plant.status === '停产'));
+}
+
+// 参与核算的流量：同一时刻的流量读数本身也要是计入的，否则按 0 处理
+function countedFlowAt(data, reading) {
+  const row = data.readings.find((r) => r.outletId === reading.outletId && r.metric === '流量' && r.at === reading.at);
+  if (!row) return 0;
+  return isCounted(data, row) ? Number(row.value) : 0;
 }
 
 // 一天里该排放口某指标的逐小时明细
@@ -55,7 +98,7 @@ function dayRows(data, outletId, metric, day) {
   const rows = readingsOf(data, { outletId, metric, day });
   return rows.map((row) => {
     const device = deviceOf(data, row.deviceId);
-    const counted = isCounted(row, device, settings);
+    const verdict = countVerdict(data, row);
     return {
       id: row.id,
       at: row.at,
@@ -66,36 +109,46 @@ function dayRows(data, outletId, metric, day) {
       deviceCode: device ? device.code : '',
       deviceStatus: device ? device.status : '',
       oxygen: oxygenAt(data, row),
-      flow: flowAt(data, row),
-      counted,
-      concentration: counted ? effectiveConcentration(row, settings) : 0,
+      flow: countedFlowAt(data, row),
+      counted: verdict.counted,
+      reasons: verdict.reasons,
+      concentration: verdict.counted ? effectiveConcentration(row, settings) : 0,
     };
   });
 }
 
-// 日均：按小时流量加权；有效小时不足 18 小时该日无效；补算小时不超过上限
+// 日均：有效小时不足 18 小时或补录超过单日上限的，该日不计入平均与总量，并写明原因
 function dailyStats(data, outletId, metric, day) {
   const settings = data.settings;
   const rows = dayRows(data, outletId, metric, day);
   const counted = rows.filter((r) => r.counted);
   const limit = metric === '氨氮' ? Number(settings.ammoniaDailyLimit) : Number(settings.codDailyLimit);
-  if (!counted.length) {
-    return { day, outletId, metric, rows, countedHours: 0, imputedHours: 0, average: 0, valid: false, limit, exceed: false, flowTotal: 0 };
+  const countedHours = counted.length;
+  const imputedHours = counted.filter((r) => r.source === '补录').length;
+  const maxImpute = Number(settings.maxImputeHoursPerDay);
+  const invalidReasons = [];
+  if (countedHours < MIN_VALID_HOURS_PER_DAY) {
+    invalidReasons.push('有效小时不足 ' + MIN_VALID_HOURS_PER_DAY + ' 小时（实际 ' + countedHours + ' 小时）');
   }
+  if (imputedHours > maxImpute) {
+    invalidReasons.push('补录小时超过单日上限（' + imputedHours + ' > ' + maxImpute + ' 小时）');
+  }
+  const valid = invalidReasons.length === 0;
   const sum = counted.reduce((acc, r) => acc + r.concentration, 0);
-  const average = store.round(sum / counted.length, 2);
+  const average = countedHours ? store.round(sum / countedHours, 2) : 0;
   const flowTotal = counted.reduce((acc, r) => acc + r.flow, 0);
   return {
     day,
     outletId,
     metric,
     rows,
-    countedHours: counted.length,
-    imputedHours: counted.filter((r) => r.source === '补录').length,
+    countedHours,
+    imputedHours,
     average,
-    valid: true,
+    valid,
+    invalidReason: invalidReasons.join('；') || null,
     limit,
-    exceed: average > limit,
+    exceed: valid && average > limit,
     flowTotal: store.round(flowTotal, 1),
   };
 }
@@ -111,24 +164,26 @@ function dailySeries(data, outletId, metric, month) {
   return out;
 }
 
-// 月均值：按有数据的天平均
+// 月均值：按有效天数平均（分母是计入的日数，不计入的日不参与）
 function monthAverage(data, outletId, metric, month) {
   const series = dailySeries(data, outletId, metric, month).filter((s) => s.valid);
-  const days = store.daysInMonth(month);
   if (!series.length) return 0;
   const sum = series.reduce((acc, s) => acc + s.average, 0);
-  return store.round(sum / days, 2);
+  return store.round(sum / series.length, 2);
 }
 
-// 月总量（吨）：逐小时浓度乘以流量相加
+// 月总量（吨）：不计入的日整体剔除；计入日内逐小时按同一时刻的浓度与流量配对累加
+// 每小时排放量(吨) = 折算浓度(mg/L) × 流量(m³/h) × 1000(升每立方米) / 1e9
 function monthTotal(data, outletId, metric, month) {
   const settings = data.settings;
-  const concRows = readingsOf(data, { outletId, metric, month }).filter((r) => isCounted(r, deviceOf(data, r.deviceId), settings));
-  const flowRows = readingsOf(data, { outletId, metric: '流量', month }).filter((r) => isCounted(r, deviceOf(data, r.deviceId), settings));
   let mg = 0;
-  for (let i = 0; i < concRows.length; i += 1) {
-    const flow = flowRows[i] ? Number(flowRows[i].value) : 0;
-    mg += effectiveConcentration(concRows[i], settings) * flow;
+  const series = dailySeries(data, outletId, metric, month);
+  for (const stats of series) {
+    if (!stats.valid) continue;
+    for (const row of stats.rows) {
+      if (!row.counted) continue;
+      mg += row.concentration * row.flow * 1000;
+    }
   }
   return store.round(mg / Number(settings.tonsDivisor), 4);
 }
@@ -227,7 +282,8 @@ function outletSummary(data, outletId, month) {
 
 module.exports = {
   plantOf, outletOf, deviceOf,
-  readingsOf, isCounted, effectiveConcentration, oxygenAt, flowAt,
+  readingsOf, countVerdict, isCounted, effectiveConcentration, oxygenAt, flowAt, countedFlowAt,
   dayRows, dailyStats, dailySeries, monthAverage, monthTotal, quarterTotal, quarterPermitTons, accumulatedTons,
   exceedance, outletsOf, outletSummary,
+  MIN_VALID_HOURS_PER_DAY,
 };

@@ -757,7 +757,10 @@
       h('td', {}, h('span', { class: 'tag ' + (r.flag === '有效' ? 'tag-ok' : 'tag-danger'), text: r.flag })),
       h('td', { text: r.source }),
       h('td', { text: textOf(r.operator) }),
-      h('td', {}, h('span', { class: 'tag ' + (r.counted ? 'tag-ok' : 'tag-danger'), text: r.counted ? '计入' : '不计入' })),
+      h('td', {}, [
+        h('span', { class: 'tag ' + (r.counted ? 'tag-ok' : 'tag-danger'), text: r.counted ? '计入' : '不计入' }),
+        (!r.counted && r.reasons && r.reasons.length) ? h('div', { class: 'cell-sub', text: r.reasons.join('；') }) : null
+      ]),
       h('td', { class: 'mono cell-page-conc', dataset: { value: pc === null ? '' : String(pc) }, text: pc === null ? '—' : fmt(pc, 2) }),
       h('td', { class: 'mono cell-api-conc', dataset: { value: (r.concentration === null || r.concentration === undefined) ? '' : String(r.concentration) }, text: textOf(r.concentration) }),
       h('td', { class: 'mono', text: textOf(r.oxygen) }),
@@ -767,6 +770,7 @@
       return h('div', { class: 'detail-grid' }, [
         h('div', { class: 'detail-block' }, [h('h3', { text: '数据 ID' }), h('div', { text: r.id })]),
         h('div', { class: 'detail-block' }, [h('h3', { text: '设备状态' }), h('div', { text: textOf(r.deviceStatus) })]),
+        h('div', { class: 'detail-block' }, [h('h3', { text: '不计入原因' }), h('div', { text: (r.reasons && r.reasons.length) ? r.reasons.join('；') : '—' })]),
         h('div', { class: 'detail-block' }, [h('h3', { text: '备注' }), h('div', { text: textOf(r.remark) })])
       ]);
     });
@@ -831,6 +835,11 @@
         ]),
         h('div', { class: 'section-note' }, [
           '「折算后浓度（页面自算）」由本页按 实测 × (21 − 基准氧) / (21 − 氧含量) 计算，氧含量取接口 oxygen，缺失按 0 代入；「接口折算浓度」直接显示接口 concentration。'
+        ]),
+        h('div', { class: 'section-note' }, [
+          '不计入口径：标记无效、设备处于校准/维护/故障、数值为负（低于检出下限）、COD 与氨氮超出量程（0 到 ',
+          h('b', { text: String((state.settings && state.settings.rangeMax) != null ? state.settings.rangeMax : 500) }),
+          '）、氧含量超出 0 到 25、单位停产或排放口停用时段，均不计入；不计入的小时不算有效小时，单日有效小时不足 18 小时或补录超过单日上限的，该日不参与平均与总量。'
         ]),
         h('div', { class: 'table-wrap' }, h('table', { id: 'tableReadings' }, [
           h('thead', {}, h('tr', {}, [
@@ -931,7 +940,8 @@
         h('td', {}, statusTag(r.deviceStatus, '正常')),
         h('td', { class: 'mono', text: textOf(r.oxygen) }),
         h('td', { class: 'mono', text: textOf(r.flow) }),
-        h('td', { text: r.counted ? '计入' : '不计入' }),
+        h('td', {}, h('span', { class: 'tag ' + (r.counted ? 'tag-ok' : 'tag-danger'), text: r.counted ? '计入' : '不计入' })),
+        h('td', { class: 'reason-cell', text: (r.reasons && r.reasons.length) ? r.reasons.join('；') : '—' }),
         h('td', { class: 'mono', text: textOf(r.concentration) })
       ]));
     });
@@ -939,7 +949,7 @@
       h('thead', {}, h('tr', {}, [
         h('th', { text: '时刻' }), h('th', { text: '小时' }), h('th', { text: '数值' }), h('th', { text: '来源' }),
         h('th', { text: '标记' }), h('th', { text: '设备' }), h('th', { text: '设备状态' }),
-        h('th', { text: '氧含量' }), h('th', { text: '流量' }), h('th', { text: '是否计入' }), h('th', { text: '接口折算浓度' })
+        h('th', { text: '氧含量' }), h('th', { text: '流量' }), h('th', { text: '是否计入' }), h('th', { text: '不计入原因' }), h('th', { text: '接口折算浓度' })
       ])),
       tb
     ]);
@@ -952,11 +962,15 @@
       h('td', { class: 'mono', text: textOf(d.imputedHours) }),
       h('td', { class: 'mono', text: fmt(d.average) }),
       h('td', { class: 'mono', text: textOf(d.limit) }),
-      h('td', {}, h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })),
-      h('td', { class: 'mono', text: fmt(d.flowTotal, 1) })
+      h('td', {}, h('span', { class: 'tag ' + (d.valid ? 'tag-ok' : 'tag-danger'), text: d.valid ? '计入' : '不计入' })),
+      h('td', {}, d.valid
+        ? h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })
+        : '—'),
+      h('td', { class: 'mono', text: fmt(d.flowTotal, 1) }),
+      h('td', { class: 'reason-cell', text: d.invalidReason || '—' })
     ], function () {
       var wrap = h('div');
-      wrap.appendChild(h('div', { class: 'section-note', text: d.day + ' · ' + metric + ' 逐小时明细（共 ' + ((d.rows || []).length) + ' 小时）' }));
+      wrap.appendChild(h('div', { class: 'section-note', text: d.day + ' · ' + metric + ' 逐小时明细（共 ' + ((d.rows || []).length) + ' 小时）' + (d.valid ? '' : '；该日不计入：' + (d.invalidReason || '')) }));
       wrap.appendChild(h('div', { class: 'table-wrap' }, hourlyTable(d.rows)));
       return wrap;
     });
@@ -1013,14 +1027,18 @@
               h('td', { class: 'nowrap', text: d.day }), h('td', { class: 'mono', text: textOf(d.countedHours) }),
               h('td', { class: 'mono', text: textOf(d.imputedHours) }), h('td', { class: 'mono', text: fmt(d.average) }),
               h('td', { class: 'mono', text: textOf(d.limit) }),
-              h('td', {}, h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })),
-              h('td', { class: 'mono', text: fmt(d.flowTotal, 1) })
+              h('td', {}, h('span', { class: 'tag ' + (d.valid ? 'tag-ok' : 'tag-danger'), text: d.valid ? '计入' : '不计入' })),
+              h('td', {}, d.valid
+                ? h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })
+                : '—'),
+              h('td', { class: 'mono', text: fmt(d.flowTotal, 1) }),
+              h('td', { class: 'reason-cell', text: d.invalidReason || '—' })
             ]));
           });
           holder.appendChild(h('div', { class: 'table-wrap' }, h('table', { class: 'mini-table' }, [
             h('thead', {}, h('tr', {}, [
               h('th', { text: '日期' }), h('th', { text: '有效小时数' }), h('th', { text: '补录小时数' }),
-              h('th', { text: '日均' }), h('th', { text: '限值' }), h('th', { text: '是否超标' }), h('th', { text: '当日流量合计' })
+              h('th', { text: '日均' }), h('th', { text: '限值' }), h('th', { text: '是否计入' }), h('th', { text: '是否超标' }), h('th', { text: '当日流量合计' }), h('th', { text: '无效原因' })
             ])),
             tb
           ])));
@@ -1140,12 +1158,12 @@
     c.appendChild(h('div', { class: 'card' }, [
       h('div', { class: 'card-head' }, [
         h('h2', { text: metric + ' 逐日明细' }),
-        h('span', { class: 'sub', text: '共 ' + series.length + ' 天（点某天展开逐小时明细）' })
+        h('span', { class: 'sub', text: '共 ' + series.length + ' 天（点某天展开逐小时明细；不计入的日期不参与月均与总量）' })
       ]),
       h('div', { class: 'table-wrap' }, h('table', { id: 'tableDaily' }, [
         h('thead', {}, h('tr', {}, [
           h('th', { text: '日期' }), h('th', { text: '有效小时数' }), h('th', { text: '补录小时数' }), h('th', { text: '日均' }),
-          h('th', { text: '限值' }), h('th', { text: '是否超标' }), h('th', { text: '当日流量合计' })
+          h('th', { text: '限值' }), h('th', { text: '是否计入' }), h('th', { text: '是否超标' }), h('th', { text: '当日流量合计' }), h('th', { text: '无效原因' })
         ])),
         dailyTb
       ]))
